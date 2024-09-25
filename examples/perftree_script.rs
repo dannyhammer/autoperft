@@ -1,7 +1,12 @@
-use anyhow::Context;
-use chessie::Game;
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
 
-/// This script exists exclusively to be used with the [perftree](https://github.com/agausmann/perftree) program for debugging.
+use anyhow::Context;
+use chessie::{Game, Move};
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -21,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     if args.len() > 3 {
         for mv_str in args[3].split_ascii_whitespace() {
             // Parse move string and apply it
-            let mv = chessie::Move::from_uci(&game, mv_str)?;
+            let mv = Move::from_uci(&game, mv_str)?;
             game.make_move(mv);
         }
     }
@@ -37,17 +42,13 @@ fn main() -> anyhow::Result<()> {
 
 /// Recursive PERFT function used to validate move generation
 fn perft<const SPLIT: bool>(game: Game, depth: usize) -> usize {
-    // Bulk counting; if we've reached depth 1, just return the number of legal moves
-    // But only if this splitperft wasn't originally called with a depth of 1.
-    if !SPLIT && depth == 1 {
-        return game.get_legal_moves().len();
-    } else if depth == 0 {
+    if depth == 0 {
         return 1;
     }
 
     // Recursively accumulate the total number of nodes
     let mut total_nodes = 0;
-    for mv in game.iter() {
+    for mv in game.get_legal_moves() {
         // Recursive calls are not split, so pass `false`
         let nodes = perft::<false>(game.with_move_made(mv), depth - 1);
 

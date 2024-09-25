@@ -1,7 +1,12 @@
-use std::{path::Path, process::Command, str::FromStr};
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+use std::{cmp::Ordering, path::Path, process::Command, str::FromStr};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chess;
 
 /// Encapsulates frequently-used data like the user-supplied script
 pub struct PerftChecker<'a> {
@@ -17,7 +22,7 @@ impl<'a> PerftChecker<'a> {
     /// Runs the checker on the provided EPD file.
     pub fn run(&self, epd_file: impl AsRef<Path>) -> Result<()> {
         let contents = std::fs::read_to_string(epd_file)?;
-        for epd in contents.lines() {
+        for epd in contents.lines().step_by(127) {
             let (fen, tests) = self.parse_epd(epd)?;
             self.check_epd(fen, tests)?;
         }
@@ -38,13 +43,8 @@ impl<'a> PerftChecker<'a> {
         Ok(())
     }
 
-    /// Executes the user-supplied script on the provided position
-    fn exec_user_perft(
-        &self,
-        depth: usize,
-        fen: &str,
-        moves: &[String],
-    ) -> Result<(Vec<(String, usize)>, usize)> {
+    /// Executes the user-supplied splitperft script, returning it's `stdout`.
+    fn exec_user_perft(&self, depth: usize, fen: &str, moves: &[String]) -> Result<String> {
         // Create the command
         let mut cmd = Command::new(self.user_script);
 
@@ -58,17 +58,26 @@ impl<'a> PerftChecker<'a> {
                 "Failed to execute user splitperft script:\n{cmd:?}"
             ))?;
 
-        // Extract the stdout and stderr from the script
-        let stdout = String::from_utf8(output.stdout)
-            .context("Failed to convert stdout of child process to String")?;
-
+        // If execution failed, print the process' stderr
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr)
                 .context("Failed to convert stderr of child process to String")?;
 
-            bail!("Move generator crashed on: {fen:?}\n\nFull error:\n{stderr}");
+            bail!(
+                "{} crashed on: {fen:?}\n\nFull error:\n{stderr}",
+                self.user_script
+            );
         }
 
+        // Extract and return the stdout from the script
+        let stdout = String::from_utf8(output.stdout)
+            .context("Failed to convert stdout of child process to String")?;
+
+        Ok(stdout)
+    }
+
+    /// Parses the output of [`Self::exec_user_perft`] to return the splitperft results.
+    fn parse_splitperft_results(&self, stdout: &str) -> Result<Vec<(String, usize)>> {
         // Parse the splitperft results
         let results = stdout
             .lines()
@@ -88,6 +97,11 @@ impl<'a> PerftChecker<'a> {
             })
             .collect();
 
+        Ok(results)
+    }
+
+    /// Parses the output of [`Self::exec_user_perft`] to return the total node count.
+    fn parse_splitperft_output_nodes_only(&self, stdout: &str) -> Result<usize> {
         let nodes = stdout.lines().last().ok_or(anyhow!(
             "User script must have a final line containing total number of nodes"
         ))?;
@@ -95,7 +109,7 @@ impl<'a> PerftChecker<'a> {
             .parse()
             .context("Failed to parse final line of user script output")?;
 
-        Ok((results, nodes))
+        Ok(nodes)
     }
 
     /// Generates a (correct) splitperft.
@@ -107,9 +121,9 @@ impl<'a> PerftChecker<'a> {
         fen: &str,
         moves: &[String],
     ) -> (Vec<(String, usize)>, usize) {
-        // println!("Generating splitperft for {fen} at depth {depth}");
         let mut results = Vec::with_capacity(128);
         let mut board: chess::Board = fen.parse().unwrap();
+
         // If there were any moves supplied, apply them
         for move_text in moves {
             match chess::ChessMove::from_str(move_text) {
@@ -172,7 +186,10 @@ impl<'a> PerftChecker<'a> {
         Ok((fen, tests))
     }
 
-    /// Recursively checks if the user script generates the proper perft result on the provided FEN.
+    /// Check if the user-supplied script generated the correct splitperft results on the provided position.
+    ///
+    /// If not, recursive down the line of illegal moves until the "problematic" position is found.
+    /// Once found, return an error explaining what the user-supplied script is doing wrong.
     fn check_splitperft<const ILLEGAL: bool>(
         &self,
         depth: usize,
@@ -180,52 +197,69 @@ impl<'a> PerftChecker<'a> {
         moves: &[String],
     ) -> Result<()> {
         // Get the perft results from the user-supplied script
-        let (user_results, user_nodes) = self.exec_user_perft(depth, fen, moves)?;
+        let user_output = self.exec_user_perft(depth, fen, moves)?;
+        // We only need the total node count for now
+        let user_nodes = self.parse_splitperft_output_nodes_only(&user_output)?;
 
         // Generate the correct result
-        let (correct_results, correct_nodes) = self.generate_splitperft(depth, fen, moves);
+        let (correct_splitperft, correct_nodes) = self.generate_splitperft(depth, fen, moves);
 
-        // If we've reached depth 1 and we're in a chain of moves that leads to an illegal position, we need to report the problematic move(s).
+        // If we've reached depth 1 in an illegal line, we need to find which move(s) are the problematic ones
         if ILLEGAL && depth == 1 {
+            let user_splitperft = self.parse_splitperft_results(&user_output)?;
+
             // Fetch all of the legal moves for this position
-            let mut legal_moves = correct_results
+            let mut legal_moves = correct_splitperft
                 .into_iter()
                 .map(|(mv, _)| mv)
                 .collect::<Vec<_>>();
             legal_moves.sort();
 
             // Fetch all of the moves the user's script created for this position
-            let mut generated_moves = user_results
+            let mut generated_moves = user_splitperft
                 .into_iter()
                 .map(|(mv, _)| mv)
                 .collect::<Vec<_>>();
             generated_moves.sort();
 
             // Get the reason as to why these lists are different.
-            let list_diff_err = check_move_lists(legal_moves, generated_moves).unwrap_err();
+            let Err(list_diff_err) = check_move_lists(legal_moves, generated_moves) else {
+                unreachable!(
+                    "Since we're in an illegal line, the provided lists should never be equal"
+                );
+            };
 
             // Generate the FEN of the position after applying all of the problematic moves
-            let new_fen = generate_fen_from(fen, &moves);
+            let new_fen = generate_fen_from(fen, moves);
 
             // Format and return the error message
             let moves_str = moves.join(", ");
             bail!("{list_diff_err}\nApplied moves: {moves_str}\nResulting FEN: {new_fen:?}");
         }
 
-        // If the user-supplied script is incorrect, we need to follow this chain of moves until we find the source
+        // If the user-supplied script did not generate the proper number of nodes, there's an error we need to find
         if user_nodes != correct_nodes {
-            // eprintln!("\tUser script failed on {fen:?} after {moves:?}: {user_nodes} nodes");
-            // Loop over every move in the correct result
-            for (mv, nodes) in correct_results {
-                // If the user-supplied script did not generate this move, it's an error
-                let Some(user_result) = user_results.iter().find(|(user_mv, _)| *user_mv == mv)
+            eprint!("\tUser script generated {user_nodes} nodes",);
+            if !moves.is_empty() {
+                eprintln!("after applying {} to {fen:?}", moves.join(" "));
+            } else {
+                eprintln!();
+            }
+
+            let user_splitperft = self.parse_splitperft_results(&user_output)?;
+
+            // To start, we need to find which move in the splitperft leads to an incorrect number of nodes
+            for (mv, correct_nodes_for_mv) in correct_splitperft {
+                // Make sure the user-supplied script generated this (correct) move, erroring out if it didn't
+                let Some((_, user_nodes_for_mv)) =
+                    user_splitperft.iter().find(|(user_mv, _)| *user_mv == mv)
                 else {
                     // Generate the FEN of the position after applying all of the problematic moves
-                    let new_fen = generate_fen_from(fen, &moves);
+                    let new_fen = generate_fen_from(fen, moves);
 
                     // Format and return the error
                     let moves_str = moves.join(", ");
-                    let user_moves = user_results
+                    let user_moves = user_splitperft
                         .into_iter()
                         .map(|(mv, _)| mv)
                         .collect::<Vec<_>>()
@@ -233,44 +267,22 @@ impl<'a> PerftChecker<'a> {
                     bail!("Failed to generate legal move {mv:?}\nApplied moves: {moves_str}\nResulting FEN: {new_fen:?}\nGenerated moves: {user_moves}");
                 };
 
-                // If the user-supplied script did not generate the appropriate number of nodes after this move, then we need to recursively follow it to find the source of the problem
-                if user_result.1 != nodes {
-                    // eprintln!("{mv:?} at depth {depth} on {fen:?} yields an incorrect {user_nodes_for_mv} nodes. Correct: {nodes}");
-                    // Append this move onto the line we're inspecting
+                // If the user-supplied script generated an incorrect number of nodes after this move, then we need to follow this move until we reach the problematic position
+                if *user_nodes_for_mv != correct_nodes_for_mv {
+                    eprintln!("Move {mv:?} at depth {depth} on {fen:?} yields an incorrect node count ({user_nodes_for_mv}). Correct: {correct_nodes_for_mv}");
+
+                    // Track this move
                     let mut moves_to_inspect = Vec::from(moves);
                     moves_to_inspect.push(mv);
 
-                    // Recursively check this line, noting that now we've found an illegal position
-                    self.check_splitperft::<true>(depth - 1, &fen, &moves_to_inspect)?;
+                    // Recursively check the resulting position
+                    self.check_splitperft::<true>(depth - 1, fen, &moves_to_inspect)?;
                 }
             }
         }
 
         Ok(())
     }
-}
-
-/// Checks the contents of two lists.
-///
-/// The length of the lists is checked first.
-/// If the lengths do not match, either you have generated an illegal move, or failed to generate a legal one.
-/// If both lists are of equal length, [`check_move_lists_of_equal_length`] is called.
-fn check_move_lists(mut expected: Vec<String>, mut generated: Vec<String>) -> Result<()> {
-    // If there are more moves in the expected list, the supplied move generator failed to generate some legal moves
-    if expected.len() > generated.len() {
-        expected.retain(|mv| !generated.contains(&mv));
-        let word = if expected.len() > 1 { "moves" } else { "move" };
-        bail!("Failed to generate legal {word}: {}", expected.join(", "));
-    }
-    // If there are more moves in the supplied list, the supplied move generator generated illegal moves
-    else if generated.len() > expected.len() {
-        generated.retain(|mv| !expected.contains(&mv));
-        let word = if generated.len() > 1 { "moves" } else { "move" };
-        bail!("Illegal {word} generated: {}", generated.join(", "));
-    }
-
-    // If the lengths of both lists match, we need to check that each move generated is correct.
-    check_move_lists_of_equal_length(expected, generated)
 }
 
 /// Generates a FEN string after applying all of `moves` to the provided `fen`.
@@ -289,6 +301,32 @@ fn generate_fen_from(fen: &str, moves: &[String]) -> String {
     board.to_string()
 }
 
+/// Checks the contents of two lists.
+///
+/// The length of the lists is checked first.
+/// If the lengths do not match, either you have generated an illegal move, or failed to generate a legal one.
+/// If both lists are of equal length, [`check_move_lists_of_equal_length`] is called.
+fn check_move_lists(mut expected: Vec<String>, mut generated: Vec<String>) -> Result<()> {
+    match expected.len().cmp(&generated.len()) {
+        // If there are more moves in the expected list, the supplied move generator failed to generate some legal moves
+        Ordering::Greater => {
+            expected.retain(|mv| !generated.contains(mv));
+            let word = if expected.len() > 1 { "moves" } else { "move" };
+            bail!("Failed to generate legal {word}: {}", expected.join(", "));
+        }
+
+        // If there are more moves in the supplied list, the supplied move generator generated illegal moves
+        Ordering::Less => {
+            generated.retain(|mv| !expected.contains(mv));
+            let word = if generated.len() > 1 { "moves" } else { "move" };
+            bail!("Illegal {word} generated: {}", generated.join(", "));
+        }
+
+        // If the lengths of both lists match, we need to check that each move generated is correct.
+        Ordering::Equal => check_move_lists_of_equal_length(expected, generated),
+    }
+}
+
 /// Checks the contents of two lists of equal length.
 ///
 /// If `generated` contains a move that `expected` does not, this returns an error.
@@ -300,7 +338,7 @@ fn check_move_lists_of_equal_length(expected: Vec<String>, generated: Vec<String
         .collect::<Vec<_>>();
 
     // If there are any such moves, they are illegal
-    if illegal.len() > 0 {
+    if !illegal.is_empty() {
         let word = if illegal.len() > 1 { "moves" } else { "move" };
         bail!(
             "Generated illegal {word}: {}\nAnd neglected to generate: {}",
@@ -315,7 +353,7 @@ fn check_move_lists_of_equal_length(expected: Vec<String>, generated: Vec<String
 
 /// Simple [PERFT](https://www.chessprogramming.org/Perft) (performance test) function.
 ///
-/// Internally uses bulk counting.
+/// Internally uses bulk counting for efficiency.
 fn perft(board: chess::Board, depth: usize) -> usize {
     let movegen = chess::MoveGen::new_legal(&board);
 

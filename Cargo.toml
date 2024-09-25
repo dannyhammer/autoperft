@@ -1,11 +1,18 @@
 [package]
-name = "chess-move-debugger"
+name = "autoperft"
 version = "0.1.0"
 edition = "2021"
+authors = ["Danny Hammer <hammerapi@gmail.com>"]
+license = "MPL-2.0"
+description = "A CLI tool for debugging chess move generation"
+repository = "https://github.com/dannyhammer/autoperft"
+homepage = "https://github.com/dannyhammer/autoperft"
+keywords = ["chess", "perft", "debugger"]
 
 [dependencies]
 anyhow = "1.0.89"
 chess = "3.2.0"
-# chessie = "0.1.0"
-chessie = { path = "../../brogle/chessie" }
 clap = { version = "4.5.18", features = ["derive"] }
+
+[dev-dependencies]
+chessie = "0.1.0"

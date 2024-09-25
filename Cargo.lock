@@ -85,6 +85,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "autoperft"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chess",
+ "chessie",
+ "clap",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.74"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,22 +134,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "chess-move-debugger"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chess",
- "chessie",
- "clap",
-]
-
-[[package]]
 name = "chessie"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f2cca300be5ebf9ab1aa26de116f447c9394a6fc2f3aea56471ad97d355c34a"
 dependencies = [
  "anyhow",
  "arrayvec 0.7.6",
- "types",
+ "chessie_types",
+]
+
+[[package]]
+name = "chessie_types"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72d3edc35f3b64aa2c5d6d514fe962a97ad915a99660d2a10f7bfb554517fff2"
+dependencies = [
+ "anyhow",
+ "rand 0.8.5",
 ]
 
 [[package]]
@@ -422,14 +434,6 @@ dependencies = [
  "quote",
  "syn 1.0.109",
  "unicode-xid",
-]
-
-[[package]]
-name = "types"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rand 0.8.5",
 ]
 
 [[package]]
