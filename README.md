@@ -105,7 +105,11 @@ cargo run --release ./your-script
 
 Additionally, there are some command line flags that can be set:
 
--   `-e` Specify a `.epd` file to test with, instead of using the [provided suite](https://github.com/dannyhammer/autoperft/blob/main/src/standard.epd)
+-   `-e <file>` Specify a `.epd` file to test with, instead of using the [provided suite](https://github.com/dannyhammer/autoperft/blob/main/src/standard.epd)
+-   `-s <n>` Skip the first `n` tests in the `.epd` file (either the standard file or user-supplied)
+-   `-f <n>` Run only the first `n` tests in the `.epd` file (either the standard file or user-supplied)
+
+Run `--help` for more information.
 
 ## Contributing
 

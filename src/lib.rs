@@ -20,10 +20,25 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Runs the checker on the provided EPD file.
-    pub fn run(&self, epd_file: impl AsRef<Path>) -> Result<()> {
+    pub fn run(
+        &self,
+        epd_file: impl AsRef<Path>,
+        start_index: usize,
+        end_index: usize,
+    ) -> Result<()> {
         let contents = std::fs::read_to_string(epd_file)?;
-        for epd in contents.lines().step_by(127) {
+        // TODO: Is there a way to iterate over only a subset of the whole WITHOUT collecting it first?
+        // Also, can we get the total number of lines WITHOUT having to collect it?
+        let epd_tests = Vec::from(&contents.lines().collect::<Vec<_>>()[start_index..end_index]);
+        let num_tests = epd_tests.len();
+
+        // Run each individual test suite
+        for (i, epd) in epd_tests.into_iter().enumerate() {
             let (fen, tests) = self.parse_epd(epd)?;
+            println!(
+                "Beginning tests on perft suite {}/{num_tests}: {fen:?}",
+                i + 1
+            );
             self.check_epd(fen, tests)?;
         }
 
@@ -31,9 +46,7 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Checks that all of the PERFT results on the provided `epd` string are valid.
-    pub fn check_epd(&self, fen: &str, tests: Vec<(usize, usize)>) -> Result<()> {
-        // Extract the FEN
-        println!("Beginning perft check on {fen:?}");
+    fn check_epd(&self, fen: &str, tests: Vec<(usize, usize)>) -> Result<()> {
         for (depth, expected) in tests {
             println!("\tChecking perft({depth}) := {expected}");
             // Check if the user-supplied move generator is correct for this depth and FEN
