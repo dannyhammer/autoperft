@@ -4,9 +4,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::{cmp::Ordering, path::Path, process::Command, str::FromStr};
+use std::{cmp::Ordering, path::Path, process::Command};
 
 use anyhow::{anyhow, bail, Context, Result};
+use chessie::{perft, Game, Move};
 
 /// Encapsulates frequently-used data like the user-supplied script
 pub struct PerftChecker<'a> {
@@ -46,7 +47,7 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Checks that all of the PERFT results on the provided `epd` string are valid.
-    fn check_epd(&self, fen: &str, tests: Vec<(usize, usize)>) -> Result<()> {
+    fn check_epd(&self, fen: &str, tests: Vec<(usize, u64)>) -> Result<()> {
         for (depth, expected) in tests {
             println!("\tChecking perft({depth}) := {expected}");
             // Check if the user-supplied move generator is correct for this depth and FEN
@@ -90,7 +91,7 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Parses the output of [`Self::exec_user_perft`] to return the splitperft results.
-    fn parse_splitperft_results(&self, stdout: &str) -> Result<Vec<(String, usize)>> {
+    fn parse_splitperft_results(&self, stdout: &str) -> Result<Vec<(String, u64)>> {
         // Parse the splitperft results
         let results = stdout
             .lines()
@@ -114,7 +115,7 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Parses the output of [`Self::exec_user_perft`] to return the total node count.
-    fn parse_splitperft_output_nodes_only(&self, stdout: &str) -> Result<usize> {
+    fn parse_splitperft_output_nodes_only(&self, stdout: &str) -> Result<u64> {
         let nodes = stdout.lines().last().ok_or(anyhow!(
             "User script must have a final line containing total number of nodes"
         ))?;
@@ -133,25 +134,23 @@ impl<'a> PerftChecker<'a> {
         depth: usize,
         fen: &str,
         moves: &[String],
-    ) -> (Vec<(String, usize)>, usize) {
+    ) -> (Vec<(String, u64)>, u64) {
         let mut results = Vec::with_capacity(128);
-        let mut board: chess::Board = fen.parse().unwrap();
+        let mut board = Game::from_fen(fen).unwrap();
 
         // If there were any moves supplied, apply them
-        for move_text in moves {
-            match chess::ChessMove::from_str(move_text) {
-                Ok(mv) => board = board.make_move_new(mv),
-                Err(_) => panic!("Invalid move {move_text} for position {board}"),
+        for mv_str in moves {
+            match Move::from_uci(&board, mv_str) {
+                Ok(mv) => board = board.with_move_made(mv),
+                Err(_) => panic!("Invalid move {mv_str} for position {board}"),
             };
         }
 
-        let movegen = chess::MoveGen::new_legal(&board);
-
         let mut nodes = 0;
-        for mv in movegen {
-            let new_board = board.make_move_new(mv);
+        for mv in board.get_legal_moves() {
+            let new_board = board.with_move_made(mv);
 
-            let new_nodes = perft(new_board, depth - 1);
+            let new_nodes = perft(&new_board, depth - 1);
             nodes += new_nodes;
 
             results.push((mv.to_string(), new_nodes));
@@ -161,7 +160,7 @@ impl<'a> PerftChecker<'a> {
     }
 
     /// Parses an EPD string into its components.
-    fn parse_epd(&self, epd: &'a str) -> Result<(&'a str, Vec<(usize, usize)>)> {
+    fn parse_epd(&self, epd: &'a str) -> Result<(&'a str, Vec<(usize, u64)>)> {
         let mut tests = Vec::with_capacity(8);
 
         // Split the EPD string into its components
@@ -181,7 +180,7 @@ impl<'a> PerftChecker<'a> {
                 .context(format!("Missing depth value in {perft_data:?}"))?
                 .trim();
             let depth = depth
-                .parse::<usize>()
+                .parse()
                 .context(format!("Invalid depth value {depth:?}"))?;
 
             // Extract and parse the expected nodes
@@ -190,7 +189,7 @@ impl<'a> PerftChecker<'a> {
                 .context(format!("Missing expected nodes value in {perft_data:?}"))?
                 .trim();
             let expected = expected
-                .parse::<usize>()
+                .parse()
                 .context(format!("Invalid expected nodes value {expected:?}"))?;
 
             tests.push((depth, expected));
@@ -301,14 +300,12 @@ impl<'a> PerftChecker<'a> {
 /// Generates a FEN string after applying all of `moves` to the provided `fen`.
 fn generate_fen_from(fen: &str, moves: &[String]) -> String {
     // eprintln!("Generating FEN from {moves:?} on {fen:?}");
-    let mut board = chess::Board::from_str(fen).unwrap();
+    let mut board = Game::from_fen(fen).unwrap();
 
-    for move_text in moves {
-        let mv = chess::ChessMove::from_str(move_text).unwrap();
-        if !board.legal(mv) {
-            panic!("{mv} not legal on {fen:?}");
-        }
-        board = board.make_move_new(mv);
+    for mv_str in moves {
+        let mv = Move::from_uci(&board, mv_str).unwrap();
+        // TODO: Maybe call `is_legal`?
+        board = board.with_move_made(mv);
     }
 
     board.to_string()
@@ -362,21 +359,4 @@ fn check_move_lists_of_equal_length(expected: Vec<String>, generated: Vec<String
 
     // If there are no such moves, we're good to go!
     Ok(())
-}
-
-/// Simple [PERFT](https://www.chessprogramming.org/Perft) (performance test) function.
-///
-/// Internally uses bulk counting for efficiency.
-fn perft(board: chess::Board, depth: usize) -> usize {
-    let movegen = chess::MoveGen::new_legal(&board);
-
-    // (Bulk counting) No need to enumerate all possible moves if we're at depth 1; just return the number of moves.
-    if depth == 1 {
-        return movegen.len();
-    } else if depth == 0 {
-        return 1;
-    }
-
-    // Recursively accumulate total number of nodes remaining.
-    movegen.fold(0, |n, mv| n + perft(board.make_move_new(mv), depth - 1))
 }

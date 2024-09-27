@@ -11,8 +11,12 @@ keywords = ["chess", "perft", "debugger"]
 
 [dependencies]
 anyhow = "1.0.89"
-chess = "3.2.0"
+chessie = "1.0.0"
 clap = { version = "4.5.18", features = ["derive"] }
 
 [dev-dependencies]
-chessie = "0.1.0"
+chessie = "1.0.0"
+# chessie = { path = "./chessie/chessie" }
+
+# [profile.release]
+# debug = true
